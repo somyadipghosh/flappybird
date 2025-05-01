@@ -6,6 +6,9 @@ const App = () => {
   const [gameOver, setGameOver] = useState(false)
   const [score, setScore] = useState(0)
   const [gameSize, setGameSize] = useState({ width: 0, height: 0 })
+  const [ultraPerformanceMode, setUltraPerformanceMode] = useState(
+    window.localStorage.getItem('ultra_perf_mode') === 'true' || window.innerWidth < 360
+  )
   
   // Bird position and physics
   const [birdPosition, setBirdPosition] = useState(0)
@@ -19,6 +22,9 @@ const App = () => {
   const GAME_SPEED = 1.3 // Slightly increased from 1.2 to make the game more challenging
   const FIXED_DELTA_TIME = 16.67 // Fixed time step (60 FPS equivalent)
   const MAX_DELTA_TIME = 50 // Cap max delta time to prevent huge jumps after lag
+  
+  // Mobile touch handling
+  const touchStartRef = useRef(false)
   
   // Accumulator for fixed time steps
   const accumulatorRef = useRef(0)
@@ -50,24 +56,36 @@ const App = () => {
   const frameCountRef = useRef(0)
   
   // Performance toggle flags
-  const ENABLE_CLOUDS = true
-  const ENABLE_BUILDINGS = true
-  const ENABLE_ANIMATIONS = true
+  const isMobile = useRef(window.innerWidth < 768)
+  const isLowEndMobile = useRef(window.innerWidth < 480)
+  const ENABLE_CLOUDS = !isMobile.current
+  const ENABLE_BUILDINGS = !isMobile.current 
+  const ENABLE_ANIMATIONS = !isMobile.current
+  const ENABLE_SCANLINES = !isMobile.current
+  const ENABLE_COMPLEX_SHADOWS = !isMobile.current
+  const ENABLE_BIRD_ANIMATION = !isLowEndMobile.current
+  const ENABLE_BACKGROUND_ELEMENTS = !isMobile.current
+  const REDUCE_PHYSICS_UPDATES = isLowEndMobile.current
+  const USE_SIMPLIFIED_RENDERING = isLowEndMobile.current
+  const LIMIT_PIPE_COUNT = isLowEndMobile.current ? 3 : (isMobile.current ? 4 : 10)
+  const ULTRA_LOW_PERFORMANCE = window.localStorage.getItem('ultra_perf_mode') === 'true' || window.innerWidth < 360
   
   // Game dimensions - will be calculated based on screen size
   const birdSizeRatio = 0.067 // percentage of game height
   const pipeWidthRatio = 0.1 // percentage of game width
-  const pipeGapRatio = 0.35 // Reduced from 0.42 to make the game more challenging
+  const pipeGapRatio = 0.28 // Reduced from 0.35 to make the game more challenging
   const pipeInterval = 1600 // Reduced from 2500 to 1600 milliseconds for faster pipe spawning
   
   // Function to calculate game dimensions based on screen size
   const calculateGameSize = useCallback(() => {
     const isMobile = window.innerWidth < 768;
+    const isLowEndDevice = window.innerWidth < 480;
     
     if (isMobile) {
       // On mobile, take 95% of screen width, aspect ratio 2:3
       const width = window.innerWidth * 0.95;
-      const height = width * 1.5;
+      // For very low-end devices, use a simpler aspect ratio to reduce pixel count
+      const height = isLowEndDevice ? width * 1.3 : width * 1.5;
       setGameSize({ width, height });
     } else {
       // On desktop, take 90% of viewport height, aspect ratio 2:3
@@ -191,15 +209,18 @@ const App = () => {
       fpsTimerRef.current -= 1000;
     }
     
+    // For very low-end mobile devices, reduce physics update frequency
+    const physicsThreshold = REDUCE_PHYSICS_UPDATES ? FIXED_DELTA_TIME * 1.5 : FIXED_DELTA_TIME;
+    
     // Fixed time step loop - only update physics at fixed intervals
     // This ensures consistent physics regardless of frame rate
     let physicsUpdated = false;
-    while (accumulatorRef.current >= FIXED_DELTA_TIME) {
+    while (accumulatorRef.current >= physicsThreshold) {
       // Update physics with fixed time step
       if (updatePhysicsRef.current) {
-        updatePhysicsRef.current(FIXED_DELTA_TIME * GAME_SPEED);
+        updatePhysicsRef.current(physicsThreshold * GAME_SPEED);
       }
-      accumulatorRef.current -= FIXED_DELTA_TIME;
+      accumulatorRef.current -= physicsThreshold;
       physicsUpdated = true;
     }
     
@@ -208,35 +229,44 @@ const App = () => {
       // Increment frame counter
       frameCounterRef.current++;
       
-      // Animate bird flapping (at reduced frequency)
-      if (frameCounterRef.current % 5 === 0) {
+      // For mobile devices, update less frequently to improve performance
+      const updateFrequency = isLowEndMobile.current ? 5 : (isMobile.current ? 3 : 1);
+      const cloudUpdateFreq = isLowEndMobile.current ? 20 : (isMobile.current ? 12 : 6);
+      const buildingUpdateFreq = isLowEndMobile.current ? 45 : (isMobile.current ? 30 : 15);
+      
+      // Animate bird flapping (at reduced frequency) - disabled on very low-end mobile
+      if (frameCounterRef.current % 5 === 0 && ENABLE_BIRD_ANIMATION) {
         const newFlapState = !birdFlapRef.current;
         birdFlapRef.current = newFlapState;
         setDisplayBirdFlap(newFlapState);
       }
       
       // Update display elements less frequently for better performance
-      if (frameCounterRef.current % 2 === 0) {
+      if (frameCounterRef.current % updateFrequency === 0) {
         setDisplayPipes([...pipesRef.current]);
       }
       
-      if (frameCounterRef.current % 6 === 0 && ENABLE_CLOUDS) {
+      if (frameCounterRef.current % cloudUpdateFreq === 0 && ENABLE_CLOUDS) {
         setDisplayClouds([...cloudsRef.current]);
       }
       
-      if (frameCounterRef.current % 15 === 0 && ENABLE_BUILDINGS) {
+      if (frameCounterRef.current % buildingUpdateFreq === 0 && ENABLE_BUILDINGS) {
         setDisplayBuildings([...buildingsRef.current]);
       }
     }
     
     // Continue the game loop
     requestAnimationFrameIdRef.current = requestAnimationFrame(updateGame);
-  }, [gameStarted, gameOver, GAME_SPEED]);
+  }, [gameStarted, gameOver, GAME_SPEED, REDUCE_PHYSICS_UPDATES, ENABLE_BIRD_ANIMATION]);
   
   // Separate physics update function with fixed time step
   const updatePhysics = useCallback((deltaTime) => {
+    // For extremely low-end mobile devices, simplify calculations to improve performance
+    const simplifiedPhysics = isLowEndMobile.current;
+    const deltaFactor = deltaTime / FIXED_DELTA_TIME;
+    
     // Update bird position based on physics
-    const newBirdPos = birdPosition + velocity * (deltaTime / FIXED_DELTA_TIME);
+    const newBirdPos = birdPosition + velocity * deltaFactor;
     
     // Calculate ground position (top of the ground area)
     const groundPosition = gameSize.height - (gameSize.height * 0.1);
@@ -257,12 +287,12 @@ const App = () => {
     }
     
     // Apply gravity to velocity with fixed time step
-    setVelocity(v => v + gravity * (deltaTime / FIXED_DELTA_TIME));
+    setVelocity(v => v + gravity * deltaFactor);
     
-    // Update cloud positions
-    if (ENABLE_CLOUDS) {
+    // Update cloud positions - skip for low-end mobile
+    if (ENABLE_CLOUDS && !simplifiedPhysics) {
       cloudsRef.current = cloudsRef.current.map(cloud => {
-        let newX = cloud.x - (cloud.speed * (deltaTime / FIXED_DELTA_TIME));
+        let newX = cloud.x - (cloud.speed * deltaFactor);
         if (newX + cloud.size < 0) {
           // Reset cloud position when it goes off-screen
           newX = gameSize.width + cloud.size;
@@ -271,10 +301,10 @@ const App = () => {
       });
     }
     
-    // Update building positions
-    if (ENABLE_BUILDINGS) {
+    // Update building positions - skip for low-end mobile
+    if (ENABLE_BUILDINGS && !simplifiedPhysics) {
       buildingsRef.current = buildingsRef.current.map(building => {
-        let newX = building.x - (gameSize.width * 0.0006 * (deltaTime / FIXED_DELTA_TIME));
+        let newX = building.x - (gameSize.width * 0.0006 * deltaFactor);
         if (newX + building.width < 0) {
           // Find the rightmost building
           const rightmostX = Math.max(...buildingsRef.current.map(b => b.x + b.width));
@@ -287,19 +317,24 @@ const App = () => {
     
     // Update pipe positions
     const pipes = pipesRef.current;
-    const pipeSpeed = gameSize.width * 0.008 * (deltaTime / FIXED_DELTA_TIME);
+    const pipeSpeed = gameSize.width * 0.008 * deltaFactor;
     const updatedPipes = pipes.map(pipe => ({
       ...pipe,
       x: pipe.x - pipeSpeed
     }));
     
-    // Check for collisions
+    // Check for collisions - simplified for low-end mobile
     const birdRight = birdLeftPosition + birdSize;
     const birdLeft = birdLeftPosition;
     
+    // Optimization: don't check collision if pipe is way off to the side
+    const activePipes = simplifiedPhysics ? 
+      updatedPipes.filter(p => Math.abs(p.x - birdLeft) < gameSize.width * 0.5) : 
+      updatedPipes;
+    
     // Check if bird is hitting any pipes
     let isCollision = false;
-    for (const pipe of updatedPipes) {
+    for (const pipe of activePipes) {
       if (pipe.x < birdRight && pipe.x + pipeWidth > birdLeft) {
         const topPipeBottom = pipe.height;
         const bottomPipeTop = pipe.height + pipeGap;
@@ -352,10 +387,19 @@ const App = () => {
     let pipeTimerId;
     
     if (gameStarted && !gameOver) {
-      // Adjust pipe interval based on game speed
-      const adjustedInterval = pipeInterval / GAME_SPEED;
+      // Adjust pipe interval based on game speed and device capability
+      const adjustedInterval = isLowEndMobile.current ? 
+        (pipeInterval / GAME_SPEED) * 1.2 : // Slightly slower pipe generation on low-end devices
+        (pipeInterval / GAME_SPEED);
       
       pipeTimerId = setInterval(() => {
+        // Limit the number of pipes for performance on mobile
+        if (pipesRef.current.length >= LIMIT_PIPE_COUNT) {
+          // Remove the farthest pipe if we're at the limit
+          const sortedPipes = [...pipesRef.current].sort((a, b) => a.x - b.x);
+          pipesRef.current = sortedPipes.slice(1);
+        }
+        
         const minHeight = gameSize.height * 0.1; // Min 10% of screen height
         const maxHeight = gameSize.height - pipeGap - minHeight;
         const height = Math.floor(Math.random() * (maxHeight - minHeight) + minHeight);
@@ -471,30 +515,42 @@ const App = () => {
           ref={gameAreaRef} 
           className="relative w-full h-full overflow-hidden cursor-pointer"
           onClick={handleJump}
+          onTouchStart={(e) => {
+            e.preventDefault(); // Prevent default behavior 
+            touchStartRef.current = true;
+            handleJump();
+          }}
+          onTouchEnd={() => {
+            touchStartRef.current = false;
+          }}
           style={{
             imageRendering: "pixelated",
             ...dayNightCycle
           }}
         >
           {/* Simplified sky background */}
-          <div className="absolute inset-0 bg-gradient-to-b from-blue-500 via-blue-400 to-blue-300"
-               style={{animation: (gameStarted && ENABLE_ANIMATIONS) ? 'skyColor 30s infinite alternate' : ''}} />
+          <div className={`absolute inset-0 ${isMobile.current ? 'bg-blue-500' : 'bg-gradient-to-b from-blue-500 via-blue-400 to-blue-300'}`}
+               style={{
+                 animation: (gameStarted && ENABLE_ANIMATIONS) ? 'skyColor 30s infinite alternate' : '',
+                 transform: 'translateZ(0)', // Force hardware acceleration
+               }} />
           
-          {/* Sun or moon - simplified */}
-          {ENABLE_ANIMATIONS && (
+          {/* Sun or moon - simplified - only show on non-mobile */}
+          {ENABLE_ANIMATIONS && !isMobile.current && (
             <div className="absolute rounded-full bg-yellow-300 border-2 border-yellow-400"
                 style={{
                   width: `${gameSize.width * 0.15}px`, 
                   height: `${gameSize.width * 0.15}px`,
                   top: `${gameSize.height * 0.1}px`,
                   right: `${gameSize.width * 0.1}px`,
-                  boxShadow: '0 0 30px rgba(250, 240, 137, 0.6)',
-                  animation: (gameStarted && ENABLE_ANIMATIONS) ? 'sunPulse 4s infinite alternate' : ''
+                  boxShadow: ENABLE_COMPLEX_SHADOWS ? '0 0 30px rgba(250, 240, 137, 0.6)' : 'none',
+                  animation: (gameStarted && ENABLE_ANIMATIONS) ? 'sunPulse 4s infinite alternate' : '',
+                  transform: 'translateZ(0)', // Force hardware acceleration
                 }} />
           )}
                
           {/* Animated clouds - only render if enabled */}
-          {ENABLE_CLOUDS && displayClouds.map((cloud, index) => (
+          {ENABLE_BACKGROUND_ELEMENTS && ENABLE_CLOUDS && displayClouds.map((cloud, index) => (
             <div key={index} className="absolute bg-white rounded-full"
                  style={{
                    width: `${cloud.size}px`,
@@ -515,7 +571,7 @@ const App = () => {
           ))}
           
           {/* Background buildings - optimized */}
-          {ENABLE_BUILDINGS && (
+          {ENABLE_BACKGROUND_ELEMENTS && ENABLE_BUILDINGS && (
             <div className="absolute bottom-0 w-full" style={{ height: `${gameSize.height * 0.3}px`, zIndex: 2 }}>
               {displayBuildings.map((building, index) => (
                 <div key={index} className="absolute bottom-0 bg-gray-900"
@@ -525,8 +581,8 @@ const App = () => {
                       height: `${building.height}px`,
                       opacity: 0.7
                     }}>
-                  {/* Pre-generated windows with fixed visibility */}
-                  {building.windows.map((row, i) => (
+                  {/* Pre-generated windows with fixed visibility - only show on desktop */}
+                  {!isMobile.current && building.windows.map((row, i) => (
                     <div key={i} className="flex justify-around" style={{ marginTop: '10px' }}>
                       {row.map((isVisible, j) => (
                         <div key={j} className="bg-yellow-200"
@@ -551,14 +607,14 @@ const App = () => {
               top: `${birdPosition}px`,
               width: `${birdSize}px`, 
               height: `${birdSize}px`,
-              transform: `rotate(${velocity * 3}deg)`,
-              transition: 'transform 0.1s ease-in',
-              boxShadow: '0 0 10px rgba(0, 0, 0, 0.5)',
+              transform: `rotate(${velocity * 3}deg) translateZ(0)`, // Force hardware acceleration with translateZ
+              transition: isMobile.current ? 'none' : 'transform 0.1s ease-in', // Remove transition on mobile
+              boxShadow: ENABLE_COMPLEX_SHADOWS ? '0 0 10px rgba(0, 0, 0, 0.5)' : 'none', // Simpler shadows on mobile
               zIndex: 10,
               willChange: 'transform' // Performance hint for browser
             }}
           >
-            {/* Bird eye */}
+            {/* Bird eye - simplified on mobile */}
             <div className="absolute w-1/4 h-1/4 bg-white rounded-full" 
                  style={{top: '20%', right: '20%'}}>
               <div className="absolute w-1/3 h-1/3 bg-black rounded-full" 
@@ -572,7 +628,7 @@ const App = () => {
                    width: '35%',
                    height: '20%'
                  }}></div>
-            {/* Bird wing - animated */}
+            {/* Bird wing - animated - simplified animation on mobile */}
             <div className="absolute bg-yellow-500 rounded-full"
                  style={{
                    width: '70%',
@@ -581,11 +637,11 @@ const App = () => {
                    left: '5%',
                    transformOrigin: 'left center',
                    transform: displayBirdFlap ? 'rotate(25deg)' : 'rotate(-10deg)',
-                   transition: 'transform 0.1s ease-in-out'
+                   transition: isMobile.current ? 'none' : 'transform 0.1s ease-in-out'
                  }}></div>
           </div>
           
-          {/* Pipes - using display pipes state */}
+          {/* Pipes - using display pipes state - optimized for mobile */}
           {displayPipes.map((pipe, index) => (
             <React.Fragment key={index}>
               {/* Top pipe */}
@@ -597,9 +653,11 @@ const App = () => {
                   width: `${pipeWidth}px`, 
                   height: `${pipe.height}px`,
                   zIndex: 15,
-                  willChange: 'transform' // Performance hint
+                  willChange: 'transform', // Performance hint
+                  transform: 'translateZ(0)' // Hardware acceleration
                 }}
               >
+                {/* Simpler pipe cap on mobile */}
                 <div className="absolute bottom-0 left-0 right-0 h-6 bg-green-800 border-2 border-green-900"></div>
               </div>
               
@@ -612,9 +670,11 @@ const App = () => {
                   width: `${pipeWidth}px`, 
                   height: `${gameSize.height - pipe.height - pipeGap}px`,
                   zIndex: 15,
-                  willChange: 'transform' // Performance hint
+                  willChange: 'transform', // Performance hint
+                  transform: 'translateZ(0)' // Hardware acceleration
                 }}
               >
+                {/* Simpler pipe cap on mobile */}
                 <div className="absolute top-0 left-0 right-0 h-6 bg-green-800 border-2 border-green-900"></div>
               </div>
             </React.Fragment>
@@ -623,24 +683,32 @@ const App = () => {
           {/* Animated Ground with moving pattern - optimized */}
           <div className="absolute bottom-0 w-full bg-amber-800 border-t-4 border-amber-900"
                style={{ height: `${gameSize.height * 0.1}px`, zIndex: 20 }}>
-            <div className="w-full h-1/2 bg-amber-700 flex items-center overflow-hidden">
-              {/* Scrolling ground pattern - only animate when needed */}
-              <div className="flex" 
-                   style={{
-                     animation: (gameStarted && !gameOver && ENABLE_ANIMATIONS) ? `scrollGround ${2/GAME_SPEED}s linear infinite` : '',
-                     width: `${gameSize.width * 2}px`,
-                     willChange: (gameStarted && !gameOver && ENABLE_ANIMATIONS) ? 'transform' : 'auto'
-                   }}>
-                {groundPattern}
+            {/* Only show animated ground pattern on desktop */}
+            {ENABLE_BACKGROUND_ELEMENTS ? (
+              <div className="w-full h-1/2 bg-amber-700 flex items-center overflow-hidden">
+                {/* Scrolling ground pattern - only animate when needed and disable on low-end mobile */}
+                <div className="flex" 
+                     style={{
+                       animation: (gameStarted && !gameOver && ENABLE_ANIMATIONS) ? `scrollGround ${2/GAME_SPEED}s linear infinite` : '',
+                       width: `${gameSize.width * 2}px`,
+                       willChange: (gameStarted && !gameOver && ENABLE_ANIMATIONS) ? 'transform' : 'auto',
+                       transform: 'translateZ(0)' // Force hardware acceleration
+                     }}>
+                  {groundPattern}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="w-full h-1/2 bg-amber-700"></div>
+            )}
           </div>
 
-          {/* Little grass tufts on ground - memoized */}
-          <div className="absolute w-full" 
-               style={{ bottom: `${gameSize.height * 0.09}px`, zIndex: 18 }}>
-            {grassTufts}
-          </div>
+          {/* Little grass tufts on ground - memoized - simplified on mobile */}
+          {(!isMobile.current || window.innerWidth >= 480) && (
+            <div className="absolute w-full" 
+                style={{ bottom: `${gameSize.height * 0.09}px`, zIndex: 18 }}>
+              {grassTufts}
+            </div>
+          )}
           
           {/* Score - retro pixelated style */}
           <div className="absolute top-8 left-0 right-0 text-center z-30">
@@ -677,6 +745,30 @@ const App = () => {
                   <div className="w-6 h-6 border-t-4 border-r-4 border-white transform rotate-135"></div>
                 </div>
               </div>
+              
+              {/* Performance mode toggle for mobile devices */}
+              {isMobile.current && (
+                <div className="mt-10 text-center">
+                  <div 
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const newValue = !ultraPerformanceMode;
+                      setUltraPerformanceMode(newValue);
+                      window.localStorage.setItem('ultra_perf_mode', newValue);
+                      // Force reload to apply changes
+                      window.location.reload();
+                    }}
+                    className="flex items-center bg-gray-800 px-3 py-2 rounded-lg border border-gray-600"
+                  >
+                    <div className={`w-4 h-4 mr-2 rounded-full ${ultraPerformanceMode ? 'bg-green-500' : 'bg-gray-400'}`}></div>
+                    <span className="text-white text-xs">Ultra Performance Mode {ultraPerformanceMode ? 'ON' : 'OFF'}</span>
+                  </div>
+                  <div className="text-gray-400 text-xs mt-1">
+                    Enable if game is laggy
+                  </div>
+                </div>
+              )}
             </div>
           )}
           
@@ -700,6 +792,10 @@ const App = () => {
               </div>
               <button 
                 onClick={handleJump}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  handleJump();
+                }}
                 className="px-6 py-3 bg-yellow-500 text-yellow-900 border-4 border-yellow-600"
                 style={{
                   ...pixelatedStyle,
