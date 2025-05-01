@@ -9,7 +9,100 @@ const App = () => {
   const [ultraPerformanceMode, setUltraPerformanceMode] = useState(
     window.localStorage.getItem('ultra_perf_mode') === 'true' || window.innerWidth < 360
   )
+  // Audio state
+  const [isMuted, setIsMuted] = useState(window.localStorage.getItem('muted') === 'true')
   
+  // Audio references
+  const bgMusicRef = useRef(null)
+  const jumpSoundRef = useRef(null)
+  const scoreSoundRef = useRef(null)
+  const gameOverSoundRef = useRef(null)
+  
+  // Initialize audio with stronger user interaction handling
+  useEffect(() => {
+    // Create audio elements
+    bgMusicRef.current = new Audio('/audio/background-music.mp3');
+    bgMusicRef.current.loop = true;
+    bgMusicRef.current.volume = 0.5;
+    bgMusicRef.current.preload = 'auto'; // Preload the audio
+    
+    // Create sound effect elements
+    jumpSoundRef.current = new Audio('/audio/jump-sound.mp3');
+    jumpSoundRef.current.volume = 0.6;
+    jumpSoundRef.current.preload = 'auto';
+    
+    scoreSoundRef.current = new Audio('/audio/score-sound.mp3');
+    scoreSoundRef.current.volume = 0.7;
+    scoreSoundRef.current.preload = 'auto';
+    
+    gameOverSoundRef.current = new Audio('/audio/game-over-sound.mp3');
+    gameOverSoundRef.current.volume = 0.8;
+    gameOverSoundRef.current.preload = 'auto';
+    
+    // Apply mute settings to all audio elements
+    if (isMuted) {
+      bgMusicRef.current.muted = true;
+      jumpSoundRef.current.muted = true;
+      scoreSoundRef.current.muted = true;
+      gameOverSoundRef.current.muted = true;
+    }
+    
+    // Add error handling for audio loading
+    bgMusicRef.current.addEventListener('error', (e) => {
+      console.error('Audio error:', e);
+    });
+    
+    return () => {
+      // Cleanup audio when component unmounts
+      [bgMusicRef, jumpSoundRef, scoreSoundRef, gameOverSoundRef].forEach(ref => {
+        if (ref.current) {
+          ref.current.pause();
+          ref.current.src = ''; // Clear source
+          ref.current = null;
+        }
+      });
+    };
+  }, [isMuted]);
+  
+  // Handle mute toggle
+  const toggleMute = useCallback((e) => {
+    e.stopPropagation(); // Prevent triggering jump
+    const newMutedState = !isMuted;
+    setIsMuted(newMutedState);
+    
+    // Save preference to localStorage
+    window.localStorage.setItem('muted', newMutedState);
+    
+    // Apply to audio elements
+    if (bgMusicRef.current) {
+      bgMusicRef.current.muted = newMutedState;
+    }
+  }, [isMuted]);
+  
+  // Improved audio play logic with better error handling
+  useEffect(() => {
+    if (bgMusicRef.current) {
+      if (gameStarted && !gameOver) {
+        const playPromise = bgMusicRef.current.play();
+        
+        // Handle play promise (required for modern browsers)
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Playback prevented by browser:', error);
+            // Audio playback was prevented by the browser
+            // This is commonly due to autoplay restrictions
+          });
+        }
+      } else {
+        bgMusicRef.current.pause();
+        // Reset audio position when game is over
+        if (gameOver) {
+          bgMusicRef.current.currentTime = 0;
+        }
+      }
+    }
+  }, [gameStarted, gameOver]);
+
   // Bird position and physics
   const [birdPosition, setBirdPosition] = useState(0)
   const [velocity, setVelocity] = useState(0)
@@ -349,11 +442,28 @@ const App = () => {
       if (!pipe.passed && pipe.x + pipeWidth < birdLeft) {
         setScore(s => s + 1);
         pipe.passed = true;
+        
+        // Play score sound when the player scores a point
+        if (scoreSoundRef.current && !isMuted) {
+          scoreSoundRef.current.currentTime = 0;
+          scoreSoundRef.current.play().catch(e => console.log("Score sound play prevented:", e));
+        }
       }
     }
     
     if (isCollision) {
       setGameOver(true);
+      
+      // Play game over sound when the player loses
+      if (gameOverSoundRef.current && !isMuted) {
+        gameOverSoundRef.current.currentTime = 0;
+        gameOverSoundRef.current.play().catch(e => console.log("Game over sound play prevented:", e));
+        
+        // Stop background music when game is over
+        if (bgMusicRef.current) {
+          bgMusicRef.current.pause();
+        }
+      }
     } else {
       // Remove pipes that are off-screen
       pipesRef.current = updatedPipes.filter(pipe => pipe.x > -pipeWidth);
@@ -430,15 +540,27 @@ const App = () => {
       frameCounterRef.current = 0;
       setGameOver(false);
       setGameStarted(true);
+      
+      // Play jump sound when restarting
+      if (jumpSoundRef.current && !isMuted) {
+        jumpSoundRef.current.currentTime = 0;
+        jumpSoundRef.current.play().catch(e => console.log("Audio play prevented:", e));
+      }
     } else {
       // Jump - using smaller strength for more controlled jumps
       setVelocity(-gameSize.height * jumpStrength);
+      
+      // Play jump sound
+      if (jumpSoundRef.current && !isMuted) {
+        jumpSoundRef.current.currentTime = 0;
+        jumpSoundRef.current.play().catch(e => console.log("Audio play prevented:", e));
+      }
       
       if (!gameStarted) {
         setGameStarted(true);
       }
     }
-  }, [gameOver, gameSize.height]);
+  }, [gameOver, gameSize.height, isMuted]);
   
   // Handle key press for jump
   useEffect(() => {
@@ -720,6 +842,24 @@ const App = () => {
             }}>{score}</div>
           </div>
           
+          {/* Mute button */}
+          <div 
+            className="absolute top-5 right-5 z-50 cursor-pointer"
+            onClick={toggleMute}
+            style={{
+              width: `${gameSize.width * 0.08}px`, 
+              height: `${gameSize.width * 0.08}px`,
+            }}
+          >
+            <div className="w-full h-full bg-black bg-opacity-50 rounded-full flex items-center justify-center">
+              {isMuted ? (
+                <div className="text-white text-lg">🔇</div>
+              ) : (
+                <div className="text-white text-lg">🔊</div>
+              )}
+            </div>
+          </div>
+
           {/* Start screen - retro arcade style */}
           {!gameStarted && !gameOver && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black bg-opacity-40 z-40">
